@@ -87,8 +87,7 @@ class _EntregaPageState extends State<EntregaPage> {
         _mostrarExito(' Entrega registrada exitosamente');
         Navigator.pop(context);
       } else {
-        _mostrarError(
-            '❌ Error: ${resultado['message'] ?? 'Error desconocido'}');
+        _mostrarError('Error: ${resultado['message'] ?? 'Error desconocido'}');
       }
     } catch (e) {
       print(' Error completo: $e');

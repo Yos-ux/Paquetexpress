@@ -2,12 +2,15 @@ from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, DECIMAL, Text, Enum
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, DECIMAL, Text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from datetime import datetime
 import hashlib
 import secrets
-from enum import Enum as PyEnum
+import mysql.connector
+from sqlalchemy import text
+from sqlalchemy.dialects.mysql import LONGTEXT
+
 
 # Configuración de base de datos
 DATABASE_URL = "mysql+mysqlconnector://root:202518@localhost/paquexpress_db"
@@ -24,7 +27,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 class Agente(Base):
     __tablename__ = "agentes"
@@ -56,7 +58,7 @@ class Paquete(Base):
     fecha_entrega = Column(DateTime)
     latitud_entrega = Column(DECIMAL(10, 8))
     longitud_entrega = Column(DECIMAL(11, 8))
-    foto_evidencia = Column(Text)
+    foto_evidencia = Column(LONGTEXT)
     observaciones = Column(Text)
 
 class HistorialEstado(Base):
@@ -69,8 +71,59 @@ class HistorialEstado(Base):
     fecha_cambio = Column(DateTime, default=datetime.utcnow)
     observaciones = Column(Text)
 
-# Crear tablas
-Base.metadata.create_all(bind=engine)
+# Función para verificar y crear la base de datos si no existe
+def setup_database():
+    try:
+        # Primero conectar sin especificar base de datos
+        conn = mysql.connector.connect(
+            host='localhost',
+            user='root',
+            password='202518'
+        )
+        
+        cursor = conn.cursor()
+        
+        # Verificar si la base de datos existe
+        cursor.execute("SHOW DATABASES LIKE 'paquexpress_db'")
+        result = cursor.fetchone()
+        
+        if not result:
+            print("Creando base de datos 'paquexpress_db'...")
+            cursor.execute("CREATE DATABASE paquexpress_db")
+            print(" Base de datos creada exitosamente")
+        else:
+            print(" Base de datos 'paquexpress_db' ya existe")
+        
+        cursor.close()
+        conn.close()
+        return True
+        
+    except Exception as e:
+        print(f"Error en setup_database: {e}")
+        return False
+
+# Llamar la función antes de crear el engine
+print("Verificando base de datos...")
+if setup_database():
+    print("Conectando a la base de datos...")
+    
+    # Probar la conexión
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT DATABASE()"))
+            current_db = result.scalar()
+            print(f"Conectado a la base de datos: {current_db}")
+            
+            # Crear tablas
+            Base.metadata.create_all(bind=engine)
+            print(" Tablas creadas exitosamente")
+            
+    except Exception as e:
+        print(f" Error de conexión: {e}")
+        exit(1)
+else:
+    print(" No se pudo configurar la base de datos")
+    exit(1)
 
 # Dependencia de base de datos
 def get_db():
@@ -142,6 +195,10 @@ class LoginResponse(BaseModel):
     agente: Optional[AgenteOut] = None
     token: Optional[str] = None
 
+class BasicResponse(BaseModel):
+    success: bool
+    message: str
+
 # Funciones de seguridad
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
@@ -160,9 +217,13 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def root():
     return {"message": "API Paquexpress funcionando correctamente", "version": "1.0.0"}
 
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "timestamp": datetime.utcnow()}
+
 @app.post("/auth/registrar", response_model=AgenteOut)
 def registrar_agente(agente: AgenteCreate, db: Session = Depends(get_db)):
-  
+    # Verificar si el email ya existe
     existente = db.query(Agente).filter(Agente.email == agente.email).first()
     if existente:
         raise HTTPException(
@@ -170,6 +231,7 @@ def registrar_agente(agente: AgenteCreate, db: Session = Depends(get_db)):
             detail="El email ya está registrado"
         )
     
+    # Verificar si el código de empleado ya existe
     existente_codigo = db.query(Agente).filter(Agente.codigo_empleado == agente.codigo_empleado).first()
     if existente_codigo:
         raise HTTPException(
@@ -177,7 +239,7 @@ def registrar_agente(agente: AgenteCreate, db: Session = Depends(get_db)):
             detail="El código de empleado ya existe"
         )
     
- 
+    # Crear nuevo agente
     hashed_password = hash_password(agente.password)
     nuevo_agente = Agente(
         codigo_empleado=agente.codigo_empleado,
@@ -186,7 +248,7 @@ def registrar_agente(agente: AgenteCreate, db: Session = Depends(get_db)):
         password_hash=hashed_password,
         telefono=agente.telefono,
         vehiculo=agente.vehiculo,
-        estado="activo" 
+        estado="activo"
     )
     
     db.add(nuevo_agente)
@@ -204,7 +266,7 @@ def login(credenciales: AgenteLogin, db: Session = Depends(get_db)):
             message="Credenciales inválidas"
         )
     
-    if agente.estado != "activo":  
+    if agente.estado != "activo":
         return LoginResponse(
             success=False,
             message="Agente inactivo. Contacte al administrador."
@@ -219,11 +281,168 @@ def login(credenciales: AgenteLogin, db: Session = Depends(get_db)):
         token=token_simulado
     )
 
+@app.post("/paquetes/crear", response_model=PaqueteOut)
+def crear_paquete(paquete: PaqueteCreate, db: Session = Depends(get_db)):
+    # Verificar si el código de seguimiento ya existe
+    existente = db.query(Paquete).filter(Paquete.codigo_seguimiento == paquete.codigo_seguimiento).first()
+    if existente:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El código de seguimiento ya existe"
+        )
+    
+    # Verificar agente si está asignado
+    if paquete.agente_asignado:
+        agente = db.query(Agente).filter(Agente.id_agente == paquete.agente_asignado).first()
+        if not agente:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El agente asignado no existe"
+            )
+    
+    # Crear nuevo paquete
+    nuevo_paquete = Paquete(
+        codigo_seguimiento=paquete.codigo_seguimiento,
+        direccion_destino=paquete.direccion_destino,
+        destinatario=paquete.destinatario,
+        telefono_destinatario=paquete.telefono_destinatario,
+        instrucciones_entrega=paquete.instrucciones_entrega,
+        peso_kg=paquete.peso_kg,
+        estado="pendiente",
+        agente_asignado=paquete.agente_asignado
+    )
+    
+    if paquete.agente_asignado:
+        nuevo_paquete.estado = "asignado"
+        nuevo_paquete.fecha_asignacion = datetime.utcnow()
+    
+    db.add(nuevo_paquete)
+    db.commit()
+    db.refresh(nuevo_paquete)
+    
+    # Crear registro en historial
+    historial = HistorialEstado(
+        id_paquete=nuevo_paquete.id_paquete,
+        estado_nuevo=nuevo_paquete.estado,
+        observaciones="Paquete creado"
+    )
+    db.add(historial)
+    db.commit()
+    
+    return nuevo_paquete
 
+@app.get("/paquetes/asignados/{agente_id}", response_model=List[PaqueteOut])
+def obtener_paquetes_asignados(agente_id: int, db: Session = Depends(get_db)):
+    # Verificar que el agente existe
+    agente = db.query(Agente).filter(Agente.id_agente == agente_id).first()
+    if not agente:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agente no encontrado"
+        )
+    
+    # Obtener paquetes asignados
+    paquetes = db.query(Paquete).filter(
+        Paquete.agente_asignado == agente_id,
+        Paquete.estado.in_(['asignado', 'en_camino'])
+    ).all()
+    
+    return paquetes
+
+@app.get("/paquetes/{paquete_id}", response_model=PaqueteOut)
+def obtener_paquete(paquete_id: int, db: Session = Depends(get_db)):
+    paquete = db.query(Paquete).filter(Paquete.id_paquete == paquete_id).first()
+    if not paquete:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Paquete no encontrado"
+        )
+    return paquete
+
+@app.post("/entregas/registrar", response_model=BasicResponse)
+def registrar_entrega(entrega: EntregaRequest, db: Session = Depends(get_db)):
+    # Verificar que el paquete existe
+    paquete = db.query(Paquete).filter(Paquete.id_paquete == entrega.id_paquete).first()
+    if not paquete:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Paquete no encontrado"
+        )
+    
+    # Verificar que el paquete puede ser entregado
+    if paquete.estado not in ['asignado', 'en_camino']:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El paquete no está asignado para entrega"
+        )
+    
+    # Crear registro en historial
+    historial = HistorialEstado(
+        id_paquete=paquete.id_paquete,
+        estado_anterior=paquete.estado,
+        estado_nuevo='entregado',
+        observaciones=entrega.observaciones
+    )
+    
+    # Actualizar paquete
+    paquete.estado = 'entregado'
+    paquete.fecha_entrega = datetime.utcnow()
+    paquete.latitud_entrega = entrega.latitud
+    paquete.longitud_entrega = entrega.longitud
+    paquete.foto_evidencia = entrega.foto_evidencia
+    paquete.observaciones = entrega.observaciones
+    
+    db.add(historial)
+    db.commit()
+    
+    return BasicResponse(
+        success=True,
+        message="Entrega registrada exitosamente"
+    )
+
+@app.put("/paquetes/{paquete_id}/estado")
+def actualizar_estado_paquete(paquete_id: int, nuevo_estado: str, db: Session = Depends(get_db)):
+    estados_permitidos = ['pendiente', 'asignado', 'en_camino', 'entregado', 'cancelado']
+    
+    if nuevo_estado not in estados_permitidos:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Estado no válido. Estados permitidos: {estados_permitidos}"
+        )
+    
+    paquete = db.query(Paquete).filter(Paquete.id_paquete == paquete_id).first()
+    if not paquete:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Paquete no encontrado"
+        )
+    
+    # Crear registro en historial
+    historial = HistorialEstado(
+        id_paquete=paquete.id_paquete,
+        estado_anterior=paquete.estado,
+        estado_nuevo=nuevo_estado,
+        observaciones=f"Estado cambiado manualmente"
+    )
+    
+    paquete.estado = nuevo_estado
+    if nuevo_estado == 'asignado':
+        paquete.fecha_asignacion = datetime.utcnow()
+    elif nuevo_estado == 'entregado':
+        paquete.fecha_entrega = datetime.utcnow()
+    
+    db.add(historial)
+    db.commit()
+    
+    return BasicResponse(
+        success=True,
+        message=f"Estado del paquete actualizado a '{nuevo_estado}'"
+    )
 
 @app.post("/poblar-datos-prueba")
 def poblar_datos_prueba(db: Session = Depends(get_db)):
     try:
+        # Crear agentes de prueba
         agentes_prueba = [
             Agente(
                 codigo_empleado="AGE001",
@@ -246,10 +465,14 @@ def poblar_datos_prueba(db: Session = Depends(get_db)):
         ]
         
         for agente in agentes_prueba:
-            db.add(agente)
+            # Verificar si ya existe
+            existente = db.query(Agente).filter(Agente.email == agente.email).first()
+            if not existente:
+                db.add(agente)
         
         db.commit()
         
+        # Crear paquetes de prueba
         paquetes_prueba = [
             Paquete(
                 codigo_seguimiento="PKG2024001",
@@ -261,15 +484,30 @@ def poblar_datos_prueba(db: Session = Depends(get_db)):
                 estado="asignado",
                 agente_asignado=1,
                 fecha_asignacion=datetime.utcnow()
+            ),
+            Paquete(
+                codigo_seguimiento="PKG2024002",
+                direccion_destino="Blvd. Bernardo Quintana 5000, Col. Centro Sur, Querétaro",
+                destinatario="María García Hernández",
+                telefono_destinatario="4427654321",
+                instrucciones_entrega="Dejar con vecino si no hay quien reciba",
+                peso_kg=1.8,
+                estado="pendiente"
             )
         ]
         
         for paquete in paquetes_prueba:
-            db.add(paquete)
+            # Verificar si ya existe
+            existente = db.query(Paquete).filter(Paquete.codigo_seguimiento == paquete.codigo_seguimiento).first()
+            if not existente:
+                db.add(paquete)
         
         db.commit()
         
-        return {"message": "Datos de prueba creados exitosamente"}
+        return BasicResponse(
+            success=True,
+            message="Datos de prueba creados exitosamente"
+        )
         
     except Exception as e:
         db.rollback()
@@ -278,64 +516,10 @@ def poblar_datos_prueba(db: Session = Depends(get_db)):
             detail=f"Error al crear datos de prueba: {str(e)}"
         )
 
-     
-@app.get("/paquetes/asignados/{agente_id}", response_model=List[PaqueteOut])
-def obtener_paquetes_asignados(agente_id: int, db: Session = Depends(get_db)):
-   
-    agente = db.query(Agente).filter(Agente.id_agente == agente_id).first()
-    if not agente:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Agente no encontrado"
-        )
-    
-    
-    paquetes = db.query(Paquete).filter(
-        Paquete.agente_asignado == agente_id,
-        Paquete.estado.in_(['asignado', 'en_camino'])
-    ).all()
-    
-    return paquetes
-
-
- 
-@app.post("/entregas/registrar")
-def registrar_entrega(entrega: EntregaRequest, db: Session = Depends(get_db)):
-  
-    paquete = db.query(Paquete).filter(Paquete.id_paquete == entrega.id_paquete).first()
-    if not paquete:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Paquete no encontrado"
-        )
-    if paquete.estado not in ['asignado', 'en_camino']:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El paquete no está asignado para entrega"
-        )
-    historial = HistorialEstado(
-        id_paquete=paquete.id_paquete,
-        estado_anterior=paquete.estado,
-        estado_nuevo='entregado',
-        observaciones=entrega.observaciones
-    )
-    paquete.estado = 'entregado'
-    paquete.fecha_entrega = datetime.utcnow()
-    paquete.latitud_entrega = entrega.latitud
-    paquete.longitud_entrega = entrega.longitud
-    paquete.foto_evidencia = entrega.foto_evidencia
-    paquete.observaciones = entrega.observaciones
-    
-    db.add(historial)
-    db.commit()
-    
-    return {
-        "success": True,
-        "message": "Entrega registrada exitosamente",
-        "paquete_id": paquete.id_paquete,
-        "codigo_seguimiento": paquete.codigo_seguimiento
-    }
-    
+@app.get("/agentes", response_model=List[AgenteOut])
+def listar_agentes(db: Session = Depends(get_db)):
+    agentes = db.query(Agente).filter(Agente.estado == "activo").all()
+    return agentes
 
 if __name__ == "__main__":
     import uvicorn

@@ -24,7 +24,6 @@ Antes de comenzar, asegúrate de tener instalado:
 - **MySQL** 8.0 o superior
 - **Git**
 
-## 🚀 Instalación y Configuración
 
 ### 1. Clonar el Repositorio
 `https://github.com/Yos-ux/Paquetexpress
