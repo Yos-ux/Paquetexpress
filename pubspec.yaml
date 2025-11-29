@@ -1,0 +1,21 @@
+name: paquexpress_app
+description: App simple para entregas Paquexpress
+
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.2
+  http: ^1.1.0
+  image_picker: ^1.0.4
+  geolocator: ^11.0.1
+  flutter_map: ^6.1.1
+  latlong2: ^0.9.1  # ✅ ACTUALIZADO para ser compatible
+
+flutter:
+  uses-material-design: true
