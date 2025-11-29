@@ -27,5 +27,4 @@ Antes de comenzar, asegúrate de tener instalado:
 ## 🚀 Instalación y Configuración
 
 ### 1. Clonar el Repositorio
-```bash
-git clone https://github.com/tuusuario/paquexpress_app.git
+`https://github.com/Yos-ux/Paquetexpress
